@@ -1,9 +1,9 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-      "open_deep_research": "./src/open_deep_research/graph.py:graph",
-      "open_deep_research_multi_agent": "./src/open_deep_research/multi_agent.py:graph",
-      "odr_workflow_v2": "./src/open_deep_research/workflow/workflow.py:workflow"
+      "open_deep_research_he": "./src/open_deep_research_he/graph.py:graph",
+      "open_deep_research_he_multi_agent": "./src/open_deep_research_he/multi_agent.py:graph",
+      "odr_he_workflow_v2": "./src/open_deep_research_he/workflow/workflow.py:workflow"
     },
     "python_version": "3.11",
     "env": "./.env",

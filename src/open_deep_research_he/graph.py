@@ -1,4 +1,3 @@
-import asyncio
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -9,7 +8,7 @@ from langgraph.constants import Send
 from langgraph.graph import START, END, StateGraph
 from langgraph.types import interrupt, Command
 
-from open_deep_research.state import (
+from open_deep_research_he.state import (
     ReportStateInput,
     ReportStateOutput,
     Sections,
@@ -20,7 +19,7 @@ from open_deep_research.state import (
     Feedback
 )
 
-from open_deep_research.prompts import (
+from open_deep_research_he.prompts import (
     report_planner_query_writer_instructions,
     report_planner_instructions,
     query_writer_instructions, 
@@ -30,8 +29,8 @@ from open_deep_research.prompts import (
     section_writer_inputs
 )
 
-from open_deep_research.configuration import WorkflowConfiguration
-from open_deep_research.utils import (
+from open_deep_research_he.configuration import WorkflowConfiguration
+from open_deep_research_he.utils import (
     format_sections, 
     get_config_value, 
     get_search_params, 
@@ -308,8 +307,7 @@ async def write_section(state: SectionState, config: RunnableConfig) -> Command[
     writer_provider = get_config_value(configurable.writer_provider)
     writer_model_name = get_config_value(configurable.writer_model)
     writer_model_kwargs = get_config_value(configurable.writer_model_kwargs or {})
-    # Use async_init_chat_model to prevent blocking the event loop
-    writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs)
+    writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs) 
 
     section_content = await writer_model.ainvoke([SystemMessage(content=section_writer_instructions),
                                            HumanMessage(content=section_writer_inputs_formatted)])
@@ -334,16 +332,19 @@ async def write_section(state: SectionState, config: RunnableConfig) -> Command[
 
     if planner_model == "claude-3-7-sonnet-latest":
         # Allocate a thinking budget for claude-3-7-sonnet-latest as the planner model
-        # Use async_init_chat_model to prevent blocking the event loop
-        reflection_model = (await async_init_chat_model(model=planner_model, 
-                                           model_provider=planner_provider, 
-                                           max_tokens=20_000, 
-                                           thinking={"type": "enabled", "budget_tokens": 16_000})).with_structured_output(Feedback)
+        # First await the coroutine to get the model object
+        model = await async_init_chat_model(model=planner_model, 
+                                            model_provider=planner_provider, 
+                                            max_tokens=20_000, 
+                                            thinking={"type": "enabled", "budget_tokens": 16_000})
+        # Then call with_structured_output on the model object
+        reflection_model = model.with_structured_output(Feedback)
     else:
-        # Use async_init_chat_model to prevent blocking the event loop
-        reflection_model = (await async_init_chat_model(model=planner_model, 
-                                           model_provider=planner_provider, 
-                                           model_kwargs=planner_model_kwargs)).with_structured_output(Feedback)
+        # First await the coroutine to get the model object
+        model = await async_init_chat_model(model=planner_model, 
+                                           model_provider=planner_provider, model_kwargs=planner_model_kwargs)
+        # Then call with_structured_output on the model object
+        reflection_model = model.with_structured_output(Feedback)
     # Generate feedback
     feedback = await reflection_model.ainvoke([SystemMessage(content=section_grader_instructions_formatted),
                                         HumanMessage(content=section_grader_message)])
@@ -392,8 +393,7 @@ async def write_final_sections(state: SectionState, config: RunnableConfig):
     writer_provider = get_config_value(configurable.writer_provider)
     writer_model_name = get_config_value(configurable.writer_model)
     writer_model_kwargs = get_config_value(configurable.writer_model_kwargs or {})
-    # Use async_init_chat_model to prevent blocking the event loop
-    writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs)
+    writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs) 
     
     section_content = await writer_model.ainvoke([SystemMessage(content=system_instructions),
                                            HumanMessage(content="Generate a report section based on the provided sources.")])
@@ -416,16 +416,16 @@ def gather_completed_sections(state: ReportState):
     Returns:
         Dict with formatted sections as context
     """
-    
-    # Get completed sections
-    completed_sections = state.get("completed_sections", [])
-    
-    # Format sections
-    report_sections = format_sections(completed_sections)
-    
-    return {"report_sections_from_research": report_sections}
 
-async def compile_final_report(state: ReportState, config: RunnableConfig):
+    # List of completed sections
+    completed_sections = state["completed_sections"]
+
+    # Format completed section to str to use as context for final sections
+    completed_report_sections = format_sections(completed_sections)
+
+    return {"report_sections_from_research": completed_report_sections}
+
+def compile_final_report(state: ReportState, config: RunnableConfig):
     """Compile all sections into the final report.
     
     This node:
@@ -439,26 +439,25 @@ async def compile_final_report(state: ReportState, config: RunnableConfig):
     Returns:
         Dict containing the complete report
     """
-    
-    # Get all completed sections
-    completed_sections = state.get("completed_sections", [])
-    
-    # Get original sections order from the plan
-    sections = state.get("sections", [])
-    
-    # Create a mapping of section names to completed sections
-    completed_section_map = {section.name: section for section in completed_sections}
-    
-    # Order completed sections according to the original plan
-    ordered_sections = []
+
+    # Get configuration
+    configurable = WorkflowConfiguration.from_runnable_config(config)
+
+    # Get sections
+    sections = state["sections"]
+    completed_sections = {s.name: s.content for s in state["completed_sections"]}
+
+    # Update sections with completed content while maintaining original order
     for section in sections:
-        if section.name in completed_section_map:
-            ordered_sections.append(completed_section_map[section.name])
-    
-    # Format the final report
-    final_report = "\n\n".join(f"# {section.name}\n\n{section.content}" for section in ordered_sections)
-    
-    return {"final_report": final_report}
+        section.content = completed_sections[section.name]
+
+    # Compile final report
+    all_sections = "\n\n".join([s.content for s in sections])
+
+    if configurable.include_source_str:
+        return {"final_report": all_sections, "source_str": state["source_str"]}
+    else:
+        return {"final_report": all_sections}
 
 def initiate_final_section_writing(state: ReportState):
     """Create parallel tasks for writing non-research sections.
@@ -472,22 +471,12 @@ def initiate_final_section_writing(state: ReportState):
     Returns:
         List of Send commands for parallel section writing
     """
-    
-    # Get topic and sections
-    topic = state["topic"]
-    sections = state.get("sections", [])
-    
-    # Filter for sections that don't require research
-    non_research_sections = [s for s in sections if not s.research]
-    
-    # Create a Send command for each non-research section
+
+    # Kick off section writing in parallel via Send() API for any sections that do not require research
     return [
-        Send("write_final_section", {
-            "topic": topic, 
-            "section": section,
-            "report_sections_from_research": state.get("report_sections_from_research", "")
-        }) 
-        for section in non_research_sections
+        Send("write_final_sections", {"topic": state["topic"], "section": s, "report_sections_from_research": state["report_sections_from_research"]}) 
+        for s in state["sections"] 
+        if not s.research
     ]
 
 # Report section sub-graph -- 
@@ -499,39 +488,27 @@ section_builder.add_node("search_web", search_web)
 section_builder.add_node("write_section", write_section)
 
 # Add edges
+section_builder.add_edge(START, "generate_queries")
 section_builder.add_edge("generate_queries", "search_web")
 section_builder.add_edge("search_web", "write_section")
-section_builder.add_edge("write_section", "search_web")
 
-# Set entry and exit points
-section_builder.set_entry_point("generate_queries")
-section_builder.set_finish_point("write_section")
-
-# Compile the section builder graph
-section_builder_graph = section_builder.compile()
-
-# Main report graph -- 
+# Outer graph for initial report plan compiling results from each section -- 
 
 # Add nodes
-report_builder = StateGraph(ReportState, output=ReportStateOutput)
-report_builder.add_node("generate_report_plan", generate_report_plan)
-report_builder.add_node("human_feedback", human_feedback)
-report_builder.add_node("gather_completed_sections", gather_completed_sections)
-report_builder.add_node("compile_final_report", compile_final_report)
-report_builder.add_node("write_final_section", write_final_sections)
-report_builder.add_node("build_section_with_web_research", section_builder_graph)
+builder = StateGraph(ReportState, input=ReportStateInput, output=ReportStateOutput, config_schema=WorkflowConfiguration)
+builder.add_node("generate_report_plan", generate_report_plan)
+builder.add_node("human_feedback", human_feedback)
+builder.add_node("build_section_with_web_research", section_builder.compile())
+builder.add_node("gather_completed_sections", gather_completed_sections)
+builder.add_node("write_final_sections", write_final_sections)
+builder.add_node("compile_final_report", compile_final_report)
 
 # Add edges
-report_builder.add_edge("generate_report_plan", "human_feedback")
-report_builder.add_edge("human_feedback", "generate_report_plan")
-report_builder.add_edge("human_feedback", "build_section_with_web_research")
-report_builder.add_edge("build_section_with_web_research", "gather_completed_sections")
-report_builder.add_edge("gather_completed_sections", initiate_final_section_writing)
-report_builder.add_edge("write_final_section", "compile_final_report")
+builder.add_edge(START, "generate_report_plan")
+builder.add_edge("generate_report_plan", "human_feedback")
+builder.add_edge("build_section_with_web_research", "gather_completed_sections")
+builder.add_conditional_edges("gather_completed_sections", initiate_final_section_writing, ["write_final_sections"])
+builder.add_edge("write_final_sections", "compile_final_report")
+builder.add_edge("compile_final_report", END)
 
-# Set entry and exit points
-report_builder.set_entry_point("generate_report_plan")
-report_builder.set_finish_point("compile_final_report")
-
-# Compile the report builder graph
-report_builder_graph = report_builder.compile()
+graph = builder.compile()

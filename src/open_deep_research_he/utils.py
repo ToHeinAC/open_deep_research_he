@@ -38,9 +38,9 @@ from langchain_core.tools import tool
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langsmith import traceable
 
-from open_deep_research.configuration import Configuration
-from open_deep_research.state import Section
-from open_deep_research.prompts import SUMMARIZATION_PROMPT
+from open_deep_research_he.configuration import Configuration
+from open_deep_research_he.state import Section
+from open_deep_research_he.prompts import SUMMARIZATION_PROMPT
 
 
 def get_config_value(value):
@@ -81,6 +81,10 @@ def get_search_params(search_api: str, search_api_config: Optional[Dict[str, Any
 
     # If no config provided, return an empty dict
     if not search_api_config:
+        return {}
+        
+    # Handle case where search_api_config is a string instead of a dict
+    if isinstance(search_api_config, str):
         return {}
 
     # Filter the config to only include accepted parameters

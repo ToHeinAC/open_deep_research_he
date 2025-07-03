@@ -1,6 +1,6 @@
 from typing import Annotated, Optional
 from langgraph.graph import MessagesState
-from open_deep_research.state import Section, SearchQuery
+from open_deep_research_he.state import Section, SearchQuery
 import operator
 from pydantic import BaseModel, Field
 

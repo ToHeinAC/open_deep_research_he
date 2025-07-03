@@ -6,8 +6,8 @@ from langgraph.constants import Send
 from langgraph.graph import START, END, StateGraph
 from langgraph.types import interrupt, Command
 
-from open_deep_research.workflow.configuration import WorkflowConfiguration
-from open_deep_research.workflow.state import (
+from open_deep_research_he.workflow.configuration import WorkflowConfiguration
+from open_deep_research_he.workflow.state import (
     ReportStateInput,
     ReportStateOutput,
     ReportState,
@@ -16,12 +16,12 @@ from open_deep_research.workflow.state import (
     ClarifyWithUser,
     SectionOutput
 )
-from open_deep_research.state import (
+from open_deep_research_he.state import (
     Sections,
     Queries,
     Feedback,
 )
-from open_deep_research.workflow.prompts import (
+from open_deep_research_he.workflow.prompts import (
     clarify_with_user_instructions,
     report_planner_query_writer_instructions,
     report_planner_instructions,
@@ -31,7 +31,7 @@ from open_deep_research.workflow.prompts import (
     section_grader_instructions,
     section_writer_inputs
 )
-from open_deep_research.utils import (
+from open_deep_research_he.utils import (
     format_sections, 
     get_config_value, 
     get_search_params, 

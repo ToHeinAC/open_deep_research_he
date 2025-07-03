@@ -1,4 +1,4 @@
-from open_deep_research.configuration import DEFAULT_REPORT_STRUCTURE, SearchAPI
+from open_deep_research_he.configuration import DEFAULT_REPORT_STRUCTURE, SearchAPI
 from dataclasses import dataclass, fields
 from typing import Optional, Dict, Any, Literal
 from langchain_core.runnables import RunnableConfig

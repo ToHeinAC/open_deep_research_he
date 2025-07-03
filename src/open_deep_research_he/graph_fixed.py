@@ -9,7 +9,7 @@ from langgraph.constants import Send
 from langgraph.graph import START, END, StateGraph
 from langgraph.types import interrupt, Command
 
-from open_deep_research.state import (
+from open_deep_research_he.state import (
     ReportStateInput,
     ReportStateOutput,
     Sections,
@@ -20,7 +20,7 @@ from open_deep_research.state import (
     Feedback
 )
 
-from open_deep_research.prompts import (
+from open_deep_research_he.prompts import (
     report_planner_query_writer_instructions,
     report_planner_instructions,
     query_writer_instructions, 
@@ -30,8 +30,8 @@ from open_deep_research.prompts import (
     section_writer_inputs
 )
 
-from open_deep_research.configuration import WorkflowConfiguration
-from open_deep_research.utils import (
+from open_deep_research_he.configuration import WorkflowConfiguration
+from open_deep_research_he.utils import (
     format_sections, 
     get_config_value, 
     get_search_params, 
@@ -210,37 +210,9 @@ async def generate_queries(state: SectionState, config: RunnableConfig):
         Dict containing the generated search queries
     """
 
-    # Get state and provide detailed error if topic is missing
-    if "topic" not in state:
-        raise ValueError("Missing 'topic' key in state. State keys: " + str(list(state.keys())))
-    
+    # Get state 
     topic = state["topic"]
-    
-    # Handle different state structures
-    # When called directly with a section object
-    if "section" in state:
-        section = state["section"]
-    # When called from the report builder graph with a list of sections
-    elif "sections" in state and len(state["sections"]) > 0:
-        # Use the first section that needs research
-        research_sections = [s for s in state["sections"] if getattr(s, "research", False)]
-        if research_sections:
-            section = research_sections[0]
-        else:
-            raise ValueError("No research sections found in state.")
-    # Handle case where section is missing but we can create one from topic
-    elif "source_str" in state:
-        # Create a section from the topic
-        from open_deep_research.state import Section
-        section = Section(name=topic, description=topic, research=True, content="")
-        # Add the section to the state for downstream nodes
-        state["section"] = section
-        print(f"Created section from topic: {topic}")
-    else:
-        # Provide more detailed error message with available state keys
-        available_keys = list(state.keys())
-        raise ValueError(f"Missing 'section' key in state and no valid sections found. Available keys: {available_keys}. Make sure to provide section data when calling generate_queries.")
-    
+    section = state["section"]
 
     # Get configuration
     configurable = WorkflowConfiguration.from_runnable_config(config)
@@ -297,9 +269,7 @@ async def search_web(state: SectionState, config: RunnableConfig):
     # Search the web with parameters
     source_str = await select_and_execute_search(search_api, query_list, params_to_pass)
 
-    # Get the current search_iterations value or default to 0 if not present
-    current_iterations = state.get("search_iterations", 0)
-    return {"source_str": source_str, "search_iterations": current_iterations + 1}
+    return {"source_str": source_str, "search_iterations": state["search_iterations"] + 1}
 
 async def write_section(state: SectionState, config: RunnableConfig) -> Command[Literal[END, "search_web"]]:
     """Write a section of the report and evaluate if more research is needed.
@@ -321,17 +291,8 @@ async def write_section(state: SectionState, config: RunnableConfig) -> Command[
 
     # Get state 
     topic = state["topic"]
+    section = state["section"]
     source_str = state["source_str"]
-    
-    # Handle case where section is missing but we can create one from topic
-    if "section" not in state:
-        from open_deep_research.state import Section
-        section = Section(name=topic, description=topic, research=True, content="")
-        # Add the section to the state for downstream nodes
-        state["section"] = section
-        print(f"Created section from topic in write_section: {topic}")
-    else:
-        section = state["section"]
 
     # Get configuration
     configurable = WorkflowConfiguration.from_runnable_config(config)
@@ -565,11 +526,7 @@ report_builder.add_edge("generate_report_plan", "human_feedback")
 report_builder.add_edge("human_feedback", "generate_report_plan")
 report_builder.add_edge("human_feedback", "build_section_with_web_research")
 report_builder.add_edge("build_section_with_web_research", "gather_completed_sections")
-# Use LangGraph's branching API for initiate_final_section_writing
-report_builder.add_conditional_edges(
-    "gather_completed_sections",
-    initiate_final_section_writing
-)
+report_builder.add_edge("gather_completed_sections", initiate_final_section_writing)
 report_builder.add_edge("write_final_section", "compile_final_report")
 
 # Set entry and exit points
@@ -578,6 +535,3 @@ report_builder.set_finish_point("compile_final_report")
 
 # Compile the report builder graph
 report_builder_graph = report_builder.compile()
-
-# Export the graph for LangGraph dev server compatibility
-graph = report_builder_graph

@@ -1,5 +1,5 @@
 [project]
-name = "open_deep_research"
+name = "open_deep_research_he"
 version = "0.0.15"
 description = "Planning, research, and report generation."
 authors = [
@@ -47,10 +47,10 @@ requires = ["setuptools>=73.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["open_deep_research", "tests"]
+packages = ["open_deep_research_he", "tests"]
 
 [tool.setuptools.package-dir]
-"open_deep_research" = "src/open_deep_research"
+"open_deep_research_he" = "src/open_deep_research_he"
 "tests" = "tests"
 
 [tool.setuptools.package-data]

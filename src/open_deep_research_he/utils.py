@@ -41,6 +41,7 @@ from langsmith import traceable
 from open_deep_research_he.configuration import Configuration
 from open_deep_research_he.state import Section
 from open_deep_research_he.prompts import SUMMARIZATION_PROMPT
+from open_deep_research_he.structured_output_workaround import with_structured_output_safe
 
 
 def get_config_value(value):
@@ -1559,7 +1560,8 @@ async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
                 "cache_control": {"type": "ephemeral", "ttl": "1h"}
             }]
 
-        summary = await model.with_structured_output(Summary).with_retry(stop_after_attempt=2).ainvoke([
+        structured_model = with_structured_output_safe(model, Summary)
+        summary = await structured_model.with_retry(stop_after_attempt=2).ainvoke([
             {"role": "system", "content": SUMMARIZATION_PROMPT.format(webpage_content=webpage_content)},
             {"role": "user", "content": user_input_content},
         ])

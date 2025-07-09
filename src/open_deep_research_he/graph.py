@@ -1,8 +1,13 @@
-from typing import Literal
+from typing import Literal, Dict, Any, List, Optional, Type, TypeVar, cast, Union
+import asyncio
+import json
+import re
 
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, BaseMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.pydantic_v1 import BaseModel
+from langchain_core.output_parsers import PydanticOutputParser
 
 from langgraph.constants import Send
 from langgraph.graph import START, END, StateGraph
@@ -18,6 +23,103 @@ from open_deep_research_he.state import (
     Queries,
     Feedback
 )
+
+# Define a type variable for the Pydantic model
+T = TypeVar('T', bound=BaseModel)
+
+# Custom function to handle structured output when with_structured_output is not available
+def custom_structured_output(model, pydantic_schema: Type[T]):
+    """
+    A workaround for models that don't support with_structured_output method.
+    Creates a similar functionality by using a PydanticOutputParser.
+    
+    Args:
+        model: The language model
+        pydantic_schema: The Pydantic schema for structured output
+        
+    Returns:
+        A runnable that parses output into the specified schema
+    """
+    parser = PydanticOutputParser(pydantic_object=pydantic_schema)
+    
+    # Create a template that instructs the model to output in the required format
+    schema_str = str(pydantic_schema.schema())
+    
+    # Get field descriptions for better prompting
+    fields_info = []
+    for field_name, field in pydantic_schema.__fields__.items():
+        description = field.field_info.description or f"The {field_name}"
+        fields_info.append(f"- {field_name}: {description}")
+    
+    field_descriptions = "\n".join(fields_info)
+    
+    # Create a wrapper class with invoke and ainvoke methods
+    class StructuredOutputRunnable:
+        def __init__(self, model, schema):
+            self.model = model
+            self.schema = schema
+            self.parser = PydanticOutputParser(pydantic_object=schema)
+        
+        def invoke(self, messages: List[BaseMessage], **kwargs) -> T:
+            # Use asyncio to run the async function
+            return asyncio.run(self.ainvoke(messages, **kwargs))
+        
+        async def ainvoke(self, messages: List[BaseMessage], **kwargs) -> T:
+            # Add formatting instructions to the last message
+            format_instructions = f"\n\nYou must respond with a JSON object that conforms to this schema:\n{schema_str}\n\nField descriptions:\n{field_descriptions}\n\nYour response must be valid JSON without any explanations or conversation outside the JSON."
+            
+            # Create a copy of messages to avoid modifying the original
+            messages_copy = messages.copy()
+            
+            # Add the formatting instructions to the last message
+            if isinstance(messages_copy[-1], HumanMessage):
+                new_content = messages_copy[-1].content + format_instructions
+                messages_copy[-1] = HumanMessage(content=new_content)
+            else:
+                messages_copy.append(HumanMessage(content=format_instructions))
+            
+            # Call the model
+            response = await self.model.ainvoke(messages_copy, **kwargs)
+            
+            # Parse the response
+            try:
+                # Extract JSON from the response
+                content = response.content
+                
+                # Try to find JSON in the response
+                json_match = re.search(r'```json\n(.+?)\n```|\{.+\}', content, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1) if json_match.group(1) else json_match.group(0)
+                    # Clean up the JSON string
+                    json_str = json_str.strip()
+                    # Parse as JSON first to validate
+                    parsed_json = json.loads(json_str)
+                    # Then use the parser to convert to the Pydantic model
+                    return cast(T, self.schema.parse_obj(parsed_json))
+                else:
+                    # If no JSON pattern found, try direct parsing
+                    return cast(T, self.schema.parse_obj(json.loads(content)))
+            except Exception as e:
+                # If parsing fails, try a more aggressive approach
+                try:
+                    # Look for anything that might be JSON
+                    potential_json = re.search(r'\{[^{}]*\}', content, re.DOTALL)
+                    if potential_json:
+                        json_str = potential_json.group(0)
+                        parsed_json = json.loads(json_str)
+                        return cast(T, self.schema.parse_obj(parsed_json))
+                    else:
+                        raise ValueError(f"Could not extract JSON from response: {content}")
+                except Exception as inner_e:
+                    raise ValueError(f"Failed to parse structured output: {str(e)}\nResponse content: {content}")
+        
+        # Support method chaining like with_retry
+        def with_retry(self, **kwargs):
+            # Return self for simple implementation
+            # In a real implementation, you would create a proper retry wrapper
+            return self
+    
+    return StructuredOutputRunnable(model, pydantic_schema)
 
 from open_deep_research_he.prompts import (
     report_planner_query_writer_instructions,
@@ -38,6 +140,8 @@ from open_deep_research_he.utils import (
     get_today_str,
     async_init_chat_model
 )
+
+from open_deep_research_he.structured_output_workaround import with_structured_output_safe
 
 ## Nodes -- 
 
@@ -85,7 +189,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     writer_model_kwargs = get_config_value(configurable.writer_model_kwargs or {})
     # Use async_init_chat_model to prevent blocking the event loop
     writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs)
-    structured_llm = writer_model.with_structured_output(Queries)
+    structured_llm = with_structured_output_safe(writer_model, Queries)
 
     # Format system instructions
     system_instructions_query = report_planner_query_writer_instructions.format(
@@ -134,7 +238,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
                                       model_kwargs=planner_model_kwargs)
     
     # Generate the report sections
-    structured_llm = planner_llm.with_structured_output(Sections)
+    structured_llm = with_structured_output_safe(planner_llm, Sections)
     report_sections = await structured_llm.ainvoke([SystemMessage(content=system_instructions_sections),
                                              HumanMessage(content=planner_message)])
 
@@ -160,38 +264,95 @@ def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Litera
     Returns:
         Command to either regenerate plan or start section writing
     """
-
-    # Get sections
+    # Extract sections and topic from state
+    sections = state["sections"]
     topic = state["topic"]
-    sections = state['sections']
-    sections_str = "\n\n".join(
-        f"Section: {section.name}\n"
-        f"Description: {section.description}\n"
-        f"Research needed: {'Yes' if section.research else 'No'}\n"
-        for section in sections
-    )
-
-    # Get feedback on the report plan from interrupt
-    interrupt_message = f"""Please provide feedback on the following report plan. 
+    
+    # Debug: Print state and sections
+    print(f"\n\n==== DEBUG: human_feedback state ====")
+    print(f"State keys: {state.keys()}")
+    print(f"Topic: {topic}")
+    print(f"Number of sections: {len(sections)}")
+    print(f"Sections: {sections}")
+    for i, s in enumerate(sections):
+        print(f"Section {i}: {s.name}, research={s.research}, type={type(s.research)}")
+    
+    # Format sections for display
+    sections_str = "\n\n".join([f"Section: {s.name}\nDescription: {s.description}\nRequires Research: {s.research}" for s in sections])
+    
+    # Create interrupt message
+    interrupt_message = f"""Here's the report plan for '{topic}':
                         \n\n{sections_str}\n
                         \nDoes the report plan meet your needs?\nPass 'true' to approve the report plan.\nOr, provide feedback to regenerate the report plan:"""
     
     feedback = interrupt(interrupt_message)
+    print(f"\n==== DEBUG: Received feedback: {feedback} (type: {type(feedback)}) ====")
 
-    # If the user approves the report plan, kick off section writing
-    if isinstance(feedback, bool) and feedback is True:
-        # Treat this as approve and kick off section writing
-        return Command(goto=[
-            Send("build_section_with_web_research", {"topic": topic, "section": s, "search_iterations": 0}) 
-            for s in sections 
-            if s.research
-        ])
+    # Extract approval from feedback
+    is_approved = False
     
-    # If the user provides feedback, regenerate the report plan 
+    # Handle dictionary feedback with UUID keys (from GUI)
+    if isinstance(feedback, dict):
+        print(f"\n==== DEBUG: Processing dictionary feedback: {feedback} ====")
+        # Extract the value from the dictionary (regardless of the key)
+        if feedback:
+            # Get the first value from the dictionary
+            first_value = next(iter(feedback.values()))
+            print(f"Extracted value from dict: {first_value} (type: {type(first_value)})")
+            
+            # Check if the value indicates approval
+            if isinstance(first_value, str) and first_value.lower().strip() in ['true', 'yes', 'approve', 'approved']:
+                is_approved = True
+                print(f"Dictionary feedback approved: {first_value}")
+            elif isinstance(first_value, bool) and first_value is True:
+                is_approved = True
+                print(f"Dictionary feedback approved: {first_value}")
+    
+    # Handle direct boolean or string feedback
+    elif (isinstance(feedback, bool) and feedback is True) or \
+         (isinstance(feedback, str) and feedback.lower().strip() in ['true', 'yes', 'approve', 'approved']):
+        is_approved = True
+        print(f"Direct feedback approved: {feedback}")
+    
+    # If approved, kick off section writing
+    if is_approved:
+        print(f"\n==== DEBUG: Approval received ====")
+        
+        # Make sure we have sections with research=True
+        research_sections = [s for s in sections if s.research]
+        print(f"Research sections: {len(research_sections)} found")
+        for i, s in enumerate(research_sections):
+            print(f"Research section {i}: {s.name}")
+            
+        if not research_sections:
+            print("WARNING: No research sections found. Adding research=True to all sections.")
+            # If no sections have research=True, treat all sections as research sections
+            research_sections = sections
+            
+        # Create the Command with Send objects for each research section
+        sends = [
+            Send("build_section_with_web_research", {"topic": topic, "section": s, "search_iterations": 0}) 
+            for s in research_sections
+        ]
+        print(f"Created {len(sends)} Send commands for research sections")
+        
+        # Debug the command we're about to return
+        command = Command(goto=sends)
+        print(f"Returning Command with goto={len(sends)} Send objects")
+        return command
+    
+    # If the user provides feedback as a string, regenerate the report plan 
     elif isinstance(feedback, str):
         # Treat this as feedback and append it to the existing list
         return Command(goto="generate_report_plan", 
                        update={"feedback_on_report_plan": [feedback]})
+    
+    # Handle dictionary feedback (common when using structured output)
+    elif isinstance(feedback, dict):
+        # Extract feedback from the dictionary if possible, or use the whole dict as feedback
+        feedback_str = feedback.get('feedback', str(feedback))
+        return Command(goto="generate_report_plan", 
+                       update={"feedback_on_report_plan": [feedback_str]})
     else:
         raise TypeError(f"Interrupt value of type {type(feedback)} is not supported.")
     
@@ -223,7 +384,7 @@ async def generate_queries(state: SectionState, config: RunnableConfig):
     writer_model_kwargs = get_config_value(configurable.writer_model_kwargs or {})
     # Use async_init_chat_model to prevent blocking the event loop
     writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs)
-    structured_llm = writer_model.with_structured_output(Queries)
+    structured_llm = with_structured_output_safe(writer_model, Queries)
 
     # Format system instructions
     system_instructions = query_writer_instructions.format(topic=topic, 
@@ -337,14 +498,14 @@ async def write_section(state: SectionState, config: RunnableConfig) -> Command[
                                             model_provider=planner_provider, 
                                             max_tokens=20_000, 
                                             thinking={"type": "enabled", "budget_tokens": 16_000})
-        # Then call with_structured_output on the model object
-        reflection_model = model.with_structured_output(Feedback)
+        # Then call with_structured_output_safe on the model object
+        reflection_model = with_structured_output_safe(model, Feedback)
     else:
         # First await the coroutine to get the model object
         model = await async_init_chat_model(model=planner_model, 
                                            model_provider=planner_provider, model_kwargs=planner_model_kwargs)
-        # Then call with_structured_output on the model object
-        reflection_model = model.with_structured_output(Feedback)
+        # Then call with_structured_output_safe on the model object
+        reflection_model = with_structured_output_safe(model, Feedback)
     # Generate feedback
     feedback = await reflection_model.ainvoke([SystemMessage(content=section_grader_instructions_formatted),
                                         HumanMessage(content=section_grader_message)])

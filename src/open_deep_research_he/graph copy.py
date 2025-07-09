@@ -40,6 +40,8 @@ from open_deep_research_he.utils import (
     async_init_chat_model
 )
 
+from open_deep_research_he.structured_output_workaround import with_structured_output_safe
+
 ## Nodes -- 
 
 async def generate_report_plan(state: ReportState, config: RunnableConfig):
@@ -86,7 +88,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     writer_model_kwargs = get_config_value(configurable.writer_model_kwargs or {})
     # Use async_init_chat_model to prevent blocking the event loop
     writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs)
-    structured_llm = writer_model.with_structured_output(Queries)
+    structured_llm = with_structured_output_safe(writer_model, Queries)
 
     # Format system instructions
     system_instructions_query = report_planner_query_writer_instructions.format(
@@ -135,7 +137,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
                                       model_kwargs=planner_model_kwargs)
     
     # Generate the report sections
-    structured_llm = planner_llm.with_structured_output(Sections)
+    structured_llm = with_structured_output_safe(planner_llm, Sections)
     report_sections = await structured_llm.ainvoke([SystemMessage(content=system_instructions_sections),
                                              HumanMessage(content=planner_message)])
 
@@ -252,7 +254,7 @@ async def generate_queries(state: SectionState, config: RunnableConfig):
     writer_model_kwargs = get_config_value(configurable.writer_model_kwargs or {})
     # Use async_init_chat_model to prevent blocking the event loop
     writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs)
-    structured_llm = writer_model.with_structured_output(Queries)
+    structured_llm = with_structured_output_safe(writer_model, Queries)
 
     # Format system instructions
     system_instructions = query_writer_instructions.format(topic=topic, 
@@ -377,12 +379,14 @@ async def write_section(state: SectionState, config: RunnableConfig) -> Command[
         reflection_model = (await async_init_chat_model(model=planner_model, 
                                            model_provider=planner_provider, 
                                            max_tokens=20_000, 
-                                           thinking={"type": "enabled", "budget_tokens": 16_000})).with_structured_output(Feedback)
+                                           thinking={"type": "enabled", "budget_tokens": 16_000}))
+        reflection_model = with_structured_output_safe(reflection_model, Feedback)
     else:
         # Use async_init_chat_model to prevent blocking the event loop
         reflection_model = (await async_init_chat_model(model=planner_model, 
                                            model_provider=planner_provider, 
-                                           model_kwargs=planner_model_kwargs)).with_structured_output(Feedback)
+                                           model_kwargs=planner_model_kwargs))
+        reflection_model = with_structured_output_safe(reflection_model, Feedback)
     # Generate feedback
     feedback = await reflection_model.ainvoke([SystemMessage(content=section_grader_instructions_formatted),
                                         HumanMessage(content=section_grader_message)])

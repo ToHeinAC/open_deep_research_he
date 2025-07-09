@@ -592,7 +592,8 @@ def compile_final_report(state: ReportState, config: RunnableConfig):
     This node:
     1. Gets all completed sections
     2. Orders them according to original plan
-    3. Combines them into the final report
+    3. Combines them into the final report with proper structure
+    4. Ensures the report reflects the detailed plan and incorporates feedback
     
     Args:
         state: Current state with all completed sections
@@ -604,21 +605,56 @@ def compile_final_report(state: ReportState, config: RunnableConfig):
     # Get configuration
     configurable = WorkflowConfiguration.from_runnable_config(config)
 
-    # Get sections
+    # Get sections and topic
+    topic = state["topic"]
     sections = state["sections"]
     completed_sections = {s.name: s.content for s in state["completed_sections"]}
 
-    # Update sections with completed content while maintaining original order
-    for section in sections:
-        section.content = completed_sections[section.name]
+    # Get feedback that was incorporated into the plan
+    feedback_list = state.get("feedback_on_report_plan", [])
+    feedback_str = "\n\n".join([f"- {feedback}" for feedback in feedback_list]) if feedback_list else ""
 
-    # Compile final report
-    all_sections = "\n\n".join([s.content for s in sections])
+    # Create report header with topic and metadata
+    report_header = f"# {topic}\n\n"
+    
+    # Add feedback information if available
+    if feedback_str:
+        report_header += f"**Report Structure Feedback Incorporated:**\n{feedback_str}\n\n"
+    
+    # Add table of contents
+    toc = "## Table of Contents\n\n"
+    for i, section in enumerate(sections):
+        toc += f"{i+1}. [{section.name}](#{section.name.lower().replace(' ', '-')})\n"
+    toc += "\n\n"
+
+    # Update sections with completed content while maintaining original order
+    formatted_sections = []
+    for section in sections:
+        if section.name in completed_sections:
+            # Get the content, ensuring it starts with the proper section header
+            content = completed_sections[section.name]
+            
+            # Only add the section header if it's not already there
+            if not content.strip().startswith(f"## {section.name}"):
+                content = f"## {section.name}\n\n{content}"
+            
+            # Add the section description as a subtitle if not already included
+            if section.description and section.description not in content:
+                # Insert description after the header but before the content
+                header_end = content.find("\n", content.find("##"))
+                if header_end != -1:
+                    content = f"{content[:header_end+1]}*{section.description}*\n\n{content[header_end+1:]}"                
+            
+            formatted_sections.append(content)
+
+    # Compile final report with header, TOC, and sections
+    all_sections = "\n\n".join(formatted_sections)
+    final_report = f"{report_header}{toc}{all_sections}"
 
     if configurable.include_source_str:
-        return {"final_report": all_sections, "source_str": state["source_str"]}
+        return {"final_report": final_report, "source_str": state["source_str"]}
     else:
-        return {"final_report": all_sections}
+        return {"final_report": final_report}
 
 def initiate_final_section_writing(state: ReportState):
     """Create parallel tasks for writing non-research sections.

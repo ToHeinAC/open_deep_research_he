@@ -41,6 +41,92 @@ from open_deep_research_he.utils import (
 )
 
 from open_deep_research_he.structured_output_workaround import with_structured_output_safe
+import re
+
+def enforce_report_structure(sections: list[Section], report_structure: str, feedback_list: list[str]) -> list[Section]:
+    """Enforce that sections follow the required structure and incorporate feedback.
+    
+    Args:
+        sections: LLM-generated sections
+        report_structure: Required structure from config
+        feedback_list: List of feedback entries
+        
+    Returns:
+        List of sections that conform to the structure and incorporate feedback
+    """
+    # If there are no sections, return empty list
+    if not sections:
+        return []
+    
+    # Process the report structure to extract required sections
+    required_sections = []
+    
+    # Handle the common structure format: "1. Introduction\n2. Main Body..." etc.
+    structure_pattern = r'\d+\.\s+([^\n(]+)(?:\s*\([^)]*\))?'
+    matches = re.findall(structure_pattern, report_structure)
+    
+    if matches:
+        for match in matches:
+            section_name = match.strip()
+            if section_name.lower() == "main body sections":
+                # For main body, we need to preserve any topic-specific sections
+                # that may have been generated
+                continue
+            else:
+                required_sections.append(section_name)
+    
+    # Process feedback to identify sections to add or modify
+    additional_sections = []
+    for feedback in feedback_list:
+        # Look for patterns like "add a section on/with/about X"
+        add_section_pattern = r'add\s+a\s+section\s+(?:on|with|about)\s+([^.,]+)'
+        match = re.search(add_section_pattern, feedback.lower())
+        if match:
+            section_name = match.group(1).strip().title()
+            additional_sections.append(section_name)
+    
+    # Create a new list of sections that follows the structure
+    new_sections = []
+    
+    # First, add required sections from the structure
+    for section_name in required_sections:
+        # Try to find this section in the generated sections
+        matching_section = next((s for s in sections if s.name.lower() == section_name.lower()), None)
+        
+        if matching_section:
+            new_sections.append(matching_section)
+        else:
+            # Create a new section if it doesn't exist
+            is_intro_or_conclusion = section_name.lower() in ["introduction", "conclusion"]
+            new_sections.append(
+                Section(
+                    name=section_name,
+                    description=f"{section_name} section as required by the report structure",
+                    research=not is_intro_or_conclusion,  # Typically intro and conclusion don't need research
+                    content=""
+                )
+            )
+    
+    # Then add appropriate topic-specific main body sections
+    topic_sections = [s for s in sections if s.name.lower() not in [sec.lower() for sec in required_sections]]
+    if topic_sections:
+        # Preserve the original order of topic sections from the LLM output
+        for section in topic_sections:
+            new_sections.append(section)
+    
+    # Finally, add any sections requested in feedback that aren't already included
+    for section_name in additional_sections:
+        if not any(s.name.lower() == section_name.lower() for s in new_sections):
+            new_sections.append(
+                Section(
+                    name=section_name,
+                    description=f"Section on {section_name} added based on feedback",
+                    research=True,
+                    content=""
+                )
+            )
+    
+    return new_sections
 
 ## Nodes -- 
 
@@ -143,8 +229,11 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
 
     # Get sections
     sections = report_sections.sections
+    
+    # Enforce the report structure and incorporate feedback
+    enforced_sections = enforce_report_structure(sections, report_structure, feedback_list)
 
-    return {"sections": sections}
+    return {"sections": enforced_sections}
 
 def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Literal["generate_report_plan","build_section_with_web_research"]]:
     """Get human feedback on the report plan and route to next steps.
@@ -164,9 +253,19 @@ def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Litera
         Command to either regenerate plan or start section writing
     """
 
-    # Get sections
+    # Get sections and topic
     topic = state["topic"]
     sections = state['sections']
+    
+    # Get configuration for report structure
+    configurable = WorkflowConfiguration.from_runnable_config(config)
+    report_structure = configurable.report_structure
+    
+    # Get any existing feedback
+    existing_feedback = state.get("feedback_on_report_plan", [])
+    existing_feedback_str = "\n".join([f"- {feedback}" for feedback in existing_feedback]) if existing_feedback else ""
+    
+    # Format sections for display
     sections_str = "\n\n".join(
         f"Section: {section.name}\n"
         f"Description: {section.description}\n"
@@ -174,27 +273,69 @@ def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Litera
         for section in sections
     )
 
-    # Get feedback on the report plan from interrupt
-    interrupt_message = f"""Please provide feedback on the following report plan. 
-                        \n\n{sections_str}\n
-                        \nDoes the report plan meet your needs?\nPass 'true' to approve the report plan.\nOr, provide feedback to regenerate the report plan:"""
+    # Create interrupt message with existing feedback if available
+    interrupt_message = f"""Here's the report plan for '{topic}':\n\n{sections_str}"""
+    
+    # Add report structure information
+    if report_structure:
+        if isinstance(report_structure, dict):
+            report_structure = str(report_structure)
+        interrupt_message += f"\n\nRequired Report Structure:\n{report_structure}"
+    
+    # Add existing feedback if available
+    if existing_feedback_str:
+        interrupt_message += f"\n\nPreviously incorporated feedback:\n{existing_feedback_str}"
+    
+    interrupt_message += "\n\nDoes the report plan meet your needs?\n- Enter 'true' or 'yes' to approve the plan and start research\n- Or provide specific feedback to modify the plan (e.g., 'Add a section on X', 'Combine sections Y and Z', etc.)"
     
     feedback = interrupt(interrupt_message)
 
-    # If the user approves the report plan, kick off section writing
+    # Handle different types of feedback
+    is_approved = False
+    
+    # Check if feedback is a boolean True or string indicating approval
     if isinstance(feedback, bool) and feedback is True:
-        # Treat this as approve and kick off section writing
+        is_approved = True
+    elif isinstance(feedback, str) and feedback.lower().strip() in ['true', 'yes', 'approve', 'approved']:
+        is_approved = True
+    # Handle dictionary feedback (from GUI)
+    elif isinstance(feedback, dict):
+        # Extract the value from the dictionary (regardless of the key)
+        if feedback:
+            first_value = next(iter(feedback.values()))
+            if isinstance(first_value, str) and first_value.lower().strip() in ['true', 'yes', 'approve', 'approved']:
+                is_approved = True
+            elif isinstance(first_value, bool) and first_value is True:
+                is_approved = True
+    
+    # If approved, kick off section writing
+    if is_approved:
+        # Make sure we have sections with research=True
+        research_sections = [s for s in sections if s.research]
+        
+        if not research_sections:
+            # If no sections have research=True, treat all sections as research sections
+            research_sections = sections
+        
         return Command(goto=[
             Send("build_section_with_web_research", {"topic": topic, "section": s, "search_iterations": 0}) 
-            for s in sections 
-            if s.research
+            for s in research_sections
         ])
     
-    # If the user provides feedback, regenerate the report plan 
+    # If the user provides feedback as a string, regenerate the report plan
     elif isinstance(feedback, str):
-        # Treat this as feedback and append it to the existing list
+        # Combine existing feedback with new feedback
+        updated_feedback = existing_feedback + [feedback]
         return Command(goto="generate_report_plan", 
-                       update={"feedback_on_report_plan": [feedback]})
+                       update={"feedback_on_report_plan": updated_feedback})
+    
+    # Handle dictionary feedback
+    elif isinstance(feedback, dict):
+        # Extract feedback from the dictionary if possible
+        feedback_str = feedback.get('feedback', str(feedback))
+        updated_feedback = existing_feedback + [feedback_str]
+        return Command(goto="generate_report_plan", 
+                       update={"feedback_on_report_plan": updated_feedback})
     else:
         raise TypeError(f"Interrupt value of type {type(feedback)} is not supported.")
     
@@ -435,7 +576,8 @@ async def compile_final_report(state: ReportState, config: RunnableConfig):
     This node:
     1. Gets all completed sections
     2. Orders them according to original plan
-    3. Combines them into the final report
+    3. Combines them into the final report with proper structure
+    4. Ensures the report reflects the detailed plan and incorporates feedback
     
     Args:
         state: Current state with all completed sections
@@ -443,30 +585,64 @@ async def compile_final_report(state: ReportState, config: RunnableConfig):
     Returns:
         Dict containing the complete report
     """
+
+    # Get configuration
+    configurable = WorkflowConfiguration.from_runnable_config(config)
+
+    # Get sections and topic
+    topic = state["topic"]
+    sections = state["sections"]
+    completed_sections = {s.name: s.content for s in state["completed_sections"]}
+
+    # Get feedback that was incorporated into the plan
+    feedback_list = state.get("feedback_on_report_plan", [])
+    feedback_str = "\n\n".join([f"- {feedback}" for feedback in feedback_list]) if feedback_list else ""
+
+    # Create report header with topic and metadata
+    report_header = f"# {topic}\n\n"
     
-    # Get all completed sections
-    completed_sections = state.get("completed_sections", [])
+    # Add feedback information if available
+    if feedback_str:
+        report_header += f"**Report Structure Feedback Incorporated:**\n{feedback_str}\n\n"
     
-    # Get original sections order from the plan
-    sections = state.get("sections", [])
-    
-    # Create a mapping of section names to completed sections
-    completed_section_map = {section.name: section for section in completed_sections}
-    
-    # Order completed sections according to the original plan
-    ordered_sections = []
+    # Add table of contents
+    toc = "## Table of Contents\n\n"
+    for i, section in enumerate(sections):
+        toc += f"{i+1}. [{section.name}](#{section.name.lower().replace(' ', '-')})\n"
+    toc += "\n\n"
+
+    # Update sections with completed content while maintaining original order
+    formatted_sections = []
     for section in sections:
-        if section.name in completed_section_map:
-            ordered_sections.append(completed_section_map[section.name])
-    
-    # Format the final report
-    final_report = "\n\n".join(f"# {section.name}\n\n{section.content}" for section in ordered_sections)
-    
-    return {"final_report": final_report}
+        if section.name in completed_sections:
+            # Get the content, ensuring it starts with the proper section header
+            content = completed_sections[section.name]
+            
+            # Only add the section header if it's not already there
+            if not content.strip().startswith(f"## {section.name}"):
+                content = f"## {section.name}\n\n{content}"
+            
+            # Add the section description as a subtitle if not already included
+            if section.description and section.description not in content:
+                # Insert description after the header but before the content
+                header_end = content.find("\n", content.find("##"))
+                if header_end != -1:
+                    content = f"{content[:header_end+1]}*{section.description}*\n\n{content[header_end+1:]}"                
+            
+            formatted_sections.append(content)
+
+    # Compile final report with header, TOC, and sections
+    all_sections = "\n\n".join(formatted_sections)
+    final_report = f"{report_header}{toc}{all_sections}"
+
+    if configurable.include_source_str:
+        return {"final_report": final_report, "source_str": state["source_str"]}
+    else:
+        return {"final_report": final_report}
 
 def initiate_final_section_writing(state: ReportState):
     """Create parallel tasks for writing non-research sections.
-    
+{{ ... }}
     This edge function identifies sections that don't need research and
     creates parallel writing tasks for each one.
     

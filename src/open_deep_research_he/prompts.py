@@ -34,7 +34,7 @@ The topic of the report is:
 </Report topic>
 
 <Report organization>
-The report should follow this organization: 
+IMPORTANT: You MUST STRICTLY follow this organization: 
 {report_organization}
 </Report organization>
 
@@ -44,21 +44,21 @@ Here is context to use to plan the sections of the report:
 </Context>
 
 <Task>
-Generate a list of sections for the report. Your plan should be tight and focused with NO overlapping sections or unnecessary filler. 
-
-For example, a good report structure might look like:
-1/ intro
-2/ overview of topic A
-3/ overview of topic B
-4/ comparison between A and B
-5/ conclusion
+Generate a list of sections for the report that EXACTLY matches the structure provided in the Report organization. Your plan should be tight and focused with NO overlapping sections or unnecessary filler.
 
 Each section should have the fields:
 
-- Name - Name for this section of the report.
+- Name - Name for this section of the report, matching the structure in Report organization.
 - Description - Brief overview of the main topics covered in this section.
 - Research - Whether to perform web research for this section of the report. IMPORTANT: Main body sections (not intro/conclusion) MUST have Research=True. A report must have AT LEAST 2-3 sections with Research=True to be useful.
 - Content - The content of the section, which you will leave blank for now.
+
+CRITICAL INSTRUCTIONS:
+1. You MUST create sections that EXACTLY match the structure in the Report organization.
+2. If the Report organization specifies "Introduction", "Main Body Sections", and "Conclusion", you MUST create these exact sections.
+3. If the Report organization specifies subsections or specific section names, you MUST include those exact sections.
+4. You MUST NOT create a generic academic structure (like Introduction, Literature Review, Methodology, Results, Discussion, Conclusion) unless specifically requested in the Report organization.
+5. You MUST NOT deviate from the structure provided in the Report organization.
 
 Integration guidelines:
 - Include examples and implementation details within main topic sections, not as separate sections
@@ -66,12 +66,12 @@ Integration guidelines:
 - Combine related concepts rather than separating them
 - CRITICAL: Every section MUST be directly relevant to the main topic
 - Avoid tangential or loosely related sections that don't directly address the core topic
-
-Before submitting, review your structure to ensure it has no redundant sections and follows a logical flow.
 </Task>
 
 <Feedback>
-Here is feedback on the report structure from review (if any):
+IMPORTANT: You MUST incorporate ALL feedback below into your plan. If feedback suggests adding a section, you MUST add that section. If feedback suggests modifying a section, you MUST modify that section accordingly.
+
+Here is feedback on the report structure that you MUST incorporate:
 {feedback}
 </Feedback>
 

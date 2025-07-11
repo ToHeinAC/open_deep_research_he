@@ -133,7 +133,8 @@ from open_deep_research_he.prompts import (
 
 from open_deep_research_he.configuration import WorkflowConfiguration
 from open_deep_research_he.utils import (
-    format_sections, 
+    format_sections,
+    format_sections_dict,
     get_config_value, 
     get_search_params, 
     select_and_execute_search,
@@ -227,8 +228,8 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
         # Use async_init_chat_model to prevent blocking the event loop
         planner_llm = await async_init_chat_model(model=planner_model, 
                                       model_provider=planner_provider, 
-                                      max_tokens=20_000, 
-                                      thinking={"type": "enabled", "budget_tokens": 16_000})
+                                      max_tokens=100_000, 
+                                      thinking={"type": "enabled", "budget_tokens": 80_000})
 
     else:
         # With other models, thinking tokens are not specifically allocated
@@ -496,8 +497,8 @@ async def write_section(state: SectionState, config: RunnableConfig) -> Command[
         # First await the coroutine to get the model object
         model = await async_init_chat_model(model=planner_model, 
                                             model_provider=planner_provider, 
-                                            max_tokens=20_000, 
-                                            thinking={"type": "enabled", "budget_tokens": 16_000})
+                                            max_tokens=100_000, 
+                                            thinking={"type": "enabled", "budget_tokens": 80_000})
         # Then call with_structured_output_safe on the model object
         reflection_model = with_structured_output_safe(model, Feedback)
     else:
@@ -582,6 +583,7 @@ def gather_completed_sections(state: ReportState):
     completed_sections = state["completed_sections"]
 
     # Format completed section to str to use as context for final sections
+    # Using format_sections for Section objects
     completed_report_sections = format_sections(completed_sections)
 
     return {"report_sections_from_research": completed_report_sections}

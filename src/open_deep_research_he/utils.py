@@ -9,10 +9,11 @@ import hashlib
 import aiohttp
 import httpx
 import time
-from typing import List, Optional, Dict, Any, Union, Literal, Annotated, cast
+from typing import List, Optional, Dict, Any, Union, Literal, Annotated, cast, Tuple
 from urllib.parse import unquote
 from collections import defaultdict
 import itertools
+import re
 
 from exa_py import Exa
 from linkup import LinkupClient
@@ -93,7 +94,7 @@ def get_search_params(search_api: str, search_api_config: Optional[Dict[str, Any
 
 def deduplicate_and_format_sources(
     search_response,
-    max_tokens_per_source=5000,
+    max_tokens_per_source=25000,
     include_raw_content=True,
     deduplication_strategy: Literal["keep_first", "keep_last"] = "keep_first"
 ):
@@ -173,6 +174,134 @@ Content:
 
 """
     return formatted_str
+
+def format_sections_dict(sections: List[dict], include_research=False) -> str:
+    """Format dictionary sections for display in the prompt."""
+    formatted = ""
+    for i, section in enumerate(sections, 1):
+        formatted += f"Section {i}: {section.get('name', 'Untitled')}\n"
+        formatted += f"Description: {section.get('description', 'No description')}\n"
+        if include_research:
+            formatted += f"Research needed: {'Yes' if section.get('research', False) else 'No'}\n"
+        formatted += "\n"
+    return formatted
+
+def parse_report_structure(structure_str: str) -> List[Dict[str, Any]]:
+    """Parse report structure into a list of expected sections.
+    
+    Args:
+        structure_str: String containing the report structure
+        
+    Returns:
+        List of dictionaries with section information
+    """
+    expected_sections = []
+    
+    # Pattern for section headers (1. Introduction, 2. Main Body, etc.)
+    section_pattern = r'(\d+)\.\s+([^(:\n]+)(?:\s+\(([^)]+)\))?'
+    
+    # Find all section matches
+    section_matches = re.finditer(section_pattern, structure_str)
+    
+    for match in section_matches:
+        section_number = match.group(1)
+        section_name = match.group(2).strip()
+        
+        # Check if there's a research indicator
+        research_needed = True  # Default to True
+        if match.group(3) and "no research" in match.group(3).lower():
+            research_needed = False
+            
+        # Add the section
+        expected_sections.append({
+            "name": section_name,
+            "research": research_needed
+        })
+        
+    return expected_sections
+
+def validate_sections_against_structure(generated_sections: List[Dict], report_structure: str) -> tuple[bool, List[str]]:
+    """Validate that generated sections match the required report structure.
+    
+    Args:
+        generated_sections: List of section dictionaries (with name, description, research)
+        report_structure: String containing the required report structure
+        
+    Returns:
+        Tuple of (is_valid, issues)
+    """
+    issues = []
+    
+    # Parse the expected sections from the report structure
+    expected_sections = parse_report_structure(report_structure)
+    
+    # If we couldn't parse any expected sections, this is an issue
+    if not expected_sections:
+        issues.append("Could not parse expected sections from report structure")
+        return False, issues
+    
+    # Convert section names to lowercase for case-insensitive comparison
+    expected_section_names = [section["name"].lower() for section in expected_sections]
+    generated_section_names = [section["name"].lower() for section in generated_sections]
+    
+    # Check if we have the right number of sections
+    if len(generated_sections) < len(expected_sections):
+        issues.append(f"Missing sections: expected at least {len(expected_sections)}, got {len(generated_sections)}")
+    
+    # Check if Introduction is present (usually required)
+    if "introduction" in expected_section_names and "introduction" not in generated_section_names:
+        issues.append("Missing required Introduction section")
+    
+    # Check if Conclusion is present (usually required)
+    if "conclusion" in expected_section_names and "conclusion" not in generated_section_names:
+        issues.append("Missing required Conclusion section")
+    
+    # Check if we have any generic academic structure that wasn't requested
+    generic_academic_sections = ["literature review", "methodology", "results", "discussion"]
+    for academic_section in generic_academic_sections:
+        # Only flag if this section wasn't expected but was generated
+        if academic_section not in expected_section_names and academic_section in generated_section_names:
+            issues.append(f"Generated unwanted generic academic section: {academic_section}")
+    
+    # If we have issues, the validation failed
+    is_valid = len(issues) == 0
+    return is_valid, issues
+
+def check_feedback_incorporation(sections: List[Dict], feedback: List[str]) -> tuple[bool, List[str]]:
+    """Check if all feedback items have been incorporated into the generated sections.
+    
+    Args:
+        sections: List of section dictionaries
+        feedback: List of feedback strings
+        
+    Returns:
+        Tuple of (all_incorporated, unincorporated_feedback)
+    """
+    if not feedback:
+        return True, []
+    
+    unincorporated = []
+    section_names_lower = [s["name"].lower() for s in sections]
+    section_descriptions = [s["description"].lower() for s in sections]
+    
+    for fb in feedback:
+        fb_lower = fb.lower()
+        
+        # Check for requests to add new sections
+        add_section_match = re.search(r'add (?:a )?section (?:on|about|with|for) ([^\.]+)', fb_lower)
+        if add_section_match:
+            requested_section = add_section_match.group(1).strip()
+            
+            # Check if any section name or description contains this requested section
+            section_added = any(requested_section in name for name in section_names_lower) or \
+                          any(requested_section in desc for desc in section_descriptions)
+            
+            if not section_added:
+                unincorporated.append(f"Requested section '{requested_section}' was not added")
+    
+    # If we have unincorporated feedback, return False
+    all_incorporated = len(unincorporated) == 0
+    return all_incorporated, unincorporated
 
 @traceable
 async def tavily_search_async(search_queries, max_results: int = 5, topic: Literal["general", "news", "finance"] = "general", include_raw_content: bool = True):
@@ -1541,7 +1670,7 @@ async def select_and_execute_search(search_api: str, query_list: list[str], para
     else:
         raise ValueError(f"Unsupported search API: {search_api}")
 
-    return deduplicate_and_format_sources(search_results, max_tokens_per_source=4000, deduplication_strategy="keep_first")
+    return deduplicate_and_format_sources(search_results, max_tokens_per_source=20000, deduplication_strategy="keep_first")
 
 
 class Summary(BaseModel):

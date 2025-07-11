@@ -109,7 +109,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig) -> Co
         # Allocate a thinking budget for claude-3-7-sonnet-latest as the planner model
         planner_llm = init_chat_model(model=planner_model, 
                                       model_provider=planner_provider, 
-                                      max_tokens=20_000, 
+                                      max_tokens=100_000, 
                                       thinking={"type": "enabled", "budget_tokens": 16_000})
     else:
         # With other models, thinking tokens are not specifically allocated
@@ -234,7 +234,7 @@ async def write_section(state: SectionState, config: RunnableConfig):
         # Allocate a thinking budget for claude-3-7-sonnet-latest as the planner model
         reflection_model = init_chat_model(model=planner_model, 
                                            model_provider=planner_provider, 
-                                           max_tokens=20_000, 
+                                           max_tokens=100_000, 
                                            thinking={"type": "enabled", "budget_tokens": 16_000})
     else:
         # With other models, thinking tokens are not specifically allocated

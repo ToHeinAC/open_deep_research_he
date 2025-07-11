@@ -32,101 +32,16 @@ from open_deep_research_he.prompts import (
 
 from open_deep_research_he.configuration import WorkflowConfiguration
 from open_deep_research_he.utils import (
-    format_sections, 
     get_config_value, 
-    get_search_params, 
+    get_search_params,
     select_and_execute_search,
+    format_sections, 
+    format_sections_dict,
     get_today_str,
     async_init_chat_model
 )
 
 from open_deep_research_he.structured_output_workaround import with_structured_output_safe
-import re
-
-def enforce_report_structure(sections: list[Section], report_structure: str, feedback_list: list[str]) -> list[Section]:
-    """Enforce that sections follow the required structure and incorporate feedback.
-    
-    Args:
-        sections: LLM-generated sections
-        report_structure: Required structure from config
-        feedback_list: List of feedback entries
-        
-    Returns:
-        List of sections that conform to the structure and incorporate feedback
-    """
-    # If there are no sections, return empty list
-    if not sections:
-        return []
-    
-    # Process the report structure to extract required sections
-    required_sections = []
-    
-    # Handle the common structure format: "1. Introduction\n2. Main Body..." etc.
-    structure_pattern = r'\d+\.\s+([^\n(]+)(?:\s*\([^)]*\))?'
-    matches = re.findall(structure_pattern, report_structure)
-    
-    if matches:
-        for match in matches:
-            section_name = match.strip()
-            if section_name.lower() == "main body sections":
-                # For main body, we need to preserve any topic-specific sections
-                # that may have been generated
-                continue
-            else:
-                required_sections.append(section_name)
-    
-    # Process feedback to identify sections to add or modify
-    additional_sections = []
-    for feedback in feedback_list:
-        # Look for patterns like "add a section on/with/about X"
-        add_section_pattern = r'add\s+a\s+section\s+(?:on|with|about)\s+([^.,]+)'
-        match = re.search(add_section_pattern, feedback.lower())
-        if match:
-            section_name = match.group(1).strip().title()
-            additional_sections.append(section_name)
-    
-    # Create a new list of sections that follows the structure
-    new_sections = []
-    
-    # First, add required sections from the structure
-    for section_name in required_sections:
-        # Try to find this section in the generated sections
-        matching_section = next((s for s in sections if s.name.lower() == section_name.lower()), None)
-        
-        if matching_section:
-            new_sections.append(matching_section)
-        else:
-            # Create a new section if it doesn't exist
-            is_intro_or_conclusion = section_name.lower() in ["introduction", "conclusion"]
-            new_sections.append(
-                Section(
-                    name=section_name,
-                    description=f"{section_name} section as required by the report structure",
-                    research=not is_intro_or_conclusion,  # Typically intro and conclusion don't need research
-                    content=""
-                )
-            )
-    
-    # Then add appropriate topic-specific main body sections
-    topic_sections = [s for s in sections if s.name.lower() not in [sec.lower() for sec in required_sections]]
-    if topic_sections:
-        # Preserve the original order of topic sections from the LLM output
-        for section in topic_sections:
-            new_sections.append(section)
-    
-    # Finally, add any sections requested in feedback that aren't already included
-    for section_name in additional_sections:
-        if not any(s.name.lower() == section_name.lower() for s in new_sections):
-            new_sections.append(
-                Section(
-                    name=section_name,
-                    description=f"Section on {section_name} added based on feedback",
-                    research=True,
-                    content=""
-                )
-            )
-    
-    return new_sections
 
 ## Nodes -- 
 
@@ -134,28 +49,27 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     """Generate the initial report plan with sections.
     
     This node:
-    1. Gets configuration for the report structure and search parameters
-    2. Generates search queries to gather context for planning
-    3. Performs web searches using those queries
-    4. Uses an LLM to generate a structured plan with sections
+    1. Generates queries for web search on the topic
+    2. Executes web search to gather context
+    3. Uses search results to create a structured report plan
+    4. Validates that the plan follows the required report structure and incorporates feedback
+    5. Returns a list of validated sections for the report
     
     Args:
-        state: Current graph state containing the report topic
-        config: Configuration for models, search APIs, etc.
+        state: Current graph state with the topic to research
+        config: Configuration for the workflow
         
     Returns:
-        Dict containing the generated sections
+        Updated state with sections to write
     """
 
-    # Inputs
+    # Extract topic and any feedback from state
     topic = state["topic"]
-
-    # Get list of feedback on the report plan
     feedback_list = state.get("feedback_on_report_plan", [])
-
+    
     # Concatenate feedback on the report plan into a single string
     feedback = " /// ".join(feedback_list) if feedback_list else ""
-
+    
     # Get configuration
     configurable = WorkflowConfiguration.from_runnable_config(config)
     report_structure = configurable.report_structure
@@ -163,11 +77,11 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     search_api = get_config_value(configurable.search_api)
     search_api_config = configurable.search_api_config or {}  # Get the config dict, default to empty
     params_to_pass = get_search_params(search_api, search_api_config)  # Filter parameters
-
+    
     # Convert JSON object to string if necessary
     if isinstance(report_structure, dict):
         report_structure = str(report_structure)
-
+    
     # Set writer model (model used for query writing)
     writer_provider = get_config_value(configurable.writer_provider)
     writer_model_name = get_config_value(configurable.writer_model)
@@ -175,7 +89,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     # Use async_init_chat_model to prevent blocking the event loop
     writer_model = await async_init_chat_model(model=writer_model_name, model_provider=writer_provider, model_kwargs=writer_model_kwargs)
     structured_llm = with_structured_output_safe(writer_model, Queries)
-
+    
     # Format system instructions
     system_instructions_query = report_planner_query_writer_instructions.format(
         topic=topic,
@@ -183,57 +97,108 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
         number_of_queries=number_of_queries,
         today=get_today_str()
     )
-
+    
     # Generate queries  
     results = await structured_llm.ainvoke([SystemMessage(content=system_instructions_query),
-                                     HumanMessage(content="Generate search queries that will help with planning the sections of the report.")])
-
+                                      HumanMessage(content="Generate search queries that will help with planning the sections of the report.")])
+    
     # Web search
     query_list = [query.search_query for query in results.queries]
-
+    
     # Search the web with parameters
     source_str = await select_and_execute_search(search_api, query_list, params_to_pass)
-
-    # Format system instructions
-    system_instructions_sections = report_planner_instructions.format(topic=topic, report_organization=report_structure, context=source_str, feedback=feedback)
-
+    
     # Set the planner
     planner_provider = get_config_value(configurable.planner_provider)
     planner_model = get_config_value(configurable.planner_model)
     planner_model_kwargs = get_config_value(configurable.planner_model_kwargs or {})
-
+    
+    # Start with initial system instructions
+    system_instructions_sections = report_planner_instructions.format(
+        topic=topic, 
+        report_organization=report_structure, 
+        context=source_str, 
+        feedback=feedback
+    )
+    
     # Report planner instructions
     planner_message = """Generate the sections of the report. Your response must include a 'sections' field containing a list of sections. 
                         Each section must have: name, description, research, and content fields."""
-
-    # Run the planner
-    if planner_model == "claude-3-7-sonnet-latest":
-        # Allocate a thinking budget for claude-3-7-sonnet-latest as the planner model
-        # Use async_init_chat_model to prevent blocking the event loop
-        planner_llm = await async_init_chat_model(model=planner_model, 
-                                      model_provider=planner_provider, 
-                                      max_tokens=20_000, 
-                                      thinking={"type": "enabled", "budget_tokens": 16_000})
-
-    else:
-        # With other models, thinking tokens are not specifically allocated
-        # Use async_init_chat_model to prevent blocking the event loop
-        planner_llm = await async_init_chat_model(model=planner_model, 
-                                      model_provider=planner_provider,
-                                      model_kwargs=planner_model_kwargs)
     
-    # Generate the report sections
-    structured_llm = with_structured_output_safe(planner_llm, Sections)
-    report_sections = await structured_llm.ainvoke([SystemMessage(content=system_instructions_sections),
-                                             HumanMessage(content=planner_message)])
-
-    # Get sections
-    sections = report_sections.sections
+    # Initialize variables for retry logic
+    max_retries = 3
+    retry_count = 0
+    sections = []
+    structure_valid = False
+    feedback_incorporated = False
+    validation_issues = []
     
-    # Enforce the report structure and incorporate feedback
-    enforced_sections = enforce_report_structure(sections, report_structure, feedback_list)
-
-    return {"sections": enforced_sections}
+    # Retry loop for generating valid sections
+    while (not structure_valid or not feedback_incorporated) and retry_count < max_retries:
+        # Run the planner with appropriate model settings
+        if planner_model == "claude-3-7-sonnet-latest":
+            # Allocate a thinking budget for claude-3-7-sonnet-latest as the planner model
+            planner_llm = await async_init_chat_model(
+                model=planner_model, 
+                model_provider=planner_provider, 
+                max_tokens=100_000, 
+                thinking={"type": "enabled", "budget_tokens": 80_000}
+            )
+        else:
+            # With other models, thinking tokens are not specifically allocated
+            planner_llm = await async_init_chat_model(
+                model=planner_model, 
+                model_provider=planner_provider,
+                model_kwargs=planner_model_kwargs
+            )
+        
+        # Generate the report sections
+        structured_llm = with_structured_output_safe(planner_llm, Sections)
+        report_sections = await structured_llm.ainvoke([SystemMessage(content=system_instructions_sections),
+                                                 HumanMessage(content=planner_message)])
+        
+        # Get sections and validate them
+        sections = report_sections.sections
+        
+        # Validate against report structure
+        structure_valid, structure_issues = validate_sections_against_structure(
+            generated_sections=sections, 
+            report_structure=report_structure
+        )
+        
+        # Check for feedback incorporation
+        feedback_incorporated, feedback_issues = check_feedback_incorporation(
+            sections=sections, 
+            feedback=feedback_list
+        )
+        
+        # Collect all validation issues
+        validation_issues = structure_issues + feedback_issues
+        
+        # If validation failed, prepare for retry with more explicit instructions
+        if not structure_valid or not feedback_incorporated:
+            retry_count += 1
+            
+            # Add validation issues to the system instructions for the next attempt
+            correction_instructions = "\n\n<CORRECTION_REQUIRED>\nThe previous plan had these issues that must be fixed:\n"
+            for i, issue in enumerate(validation_issues, 1):
+                correction_instructions += f"{i}. {issue}\n"
+            
+            correction_instructions += "\nFix ALL of these issues in your new plan. The corrected plan MUST:\n"
+            correction_instructions += "1. STRICTLY follow the required report structure\n"
+            correction_instructions += "2. Include ALL requested sections from feedback\n"
+            correction_instructions += "3. NOT include generic academic sections (Literature Review, Methodology, etc.) unless specifically requested\n"
+            correction_instructions += "</CORRECTION_REQUIRED>"
+            
+            # Add the correction instructions to the system instructions
+            system_instructions_sections += correction_instructions
+    
+    # If we couldn't generate valid sections after max retries, log a warning but continue with best attempt
+    if not structure_valid or not feedback_incorporated:
+        print(f"Warning: Could not generate fully valid report sections after {max_retries} attempts.")
+        print(f"Remaining validation issues: {validation_issues}")
+    
+    return {"sections": sections}
 
 def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Literal["generate_report_plan","build_section_with_web_research"]]:
     """Get human feedback on the report plan and route to next steps.
@@ -480,8 +445,8 @@ async def write_section(state: SectionState, config: RunnableConfig) -> Command[
         # Use async_init_chat_model to prevent blocking the event loop
         reflection_model = (await async_init_chat_model(model=planner_model, 
                                            model_provider=planner_provider, 
-                                           max_tokens=20_000, 
-                                           thinking={"type": "enabled", "budget_tokens": 16_000}))
+                                           max_tokens=100_000, 
+                                           thinking={"type": "enabled", "budget_tokens": 80_000}))
         reflection_model = with_structured_output_safe(reflection_model, Feedback)
     else:
         # Use async_init_chat_model to prevent blocking the event loop
@@ -565,7 +530,7 @@ def gather_completed_sections(state: ReportState):
     # Get completed sections
     completed_sections = state.get("completed_sections", [])
     
-    # Format sections
+    # Format sections - using format_sections for Section objects
     report_sections = format_sections(completed_sections)
     
     return {"report_sections_from_research": report_sections}
